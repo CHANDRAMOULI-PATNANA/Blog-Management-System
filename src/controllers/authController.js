@@ -1,51 +1,75 @@
-const bcrypt = require('bcrypt');
-const jwt = require('jsonwebtoken');
-const User = require('../models/userModel');
-const { sendVerificationEmail } = require('../utils/emailService');
-const { generateToken } = require('../utils/jwtService');
+const bcrypt = require('bcrypt')
+const jwt = require('jsonwebtoken')
+const User = require('../models/User')
+const sendEmail = require('../utils/sendEmail')
 
-exports.signup = async (req, res) => {
+exports.signUp = async (req, res) => {
+  const { username, email, password } = req.body
+
   try {
-    const { username, email, password } = req.body;
-    const hashedPassword = await bcrypt.hash(password, 10);
-    const user = new User({ username, email, password: hashedPassword, role: 'User', isVerified: false });
-    await user.save();
-    sendVerificationEmail(user.email, user._id.toString());
-    res.status(201).json({ message: 'User registered successfully. Please verify your email.' });
+    const existingUser = await User.findOne({ email })
+    if (existingUser) {
+      return res.status(400).json({ message: 'User already exists' })
+    }
+
+    const hashedPassword = await bcrypt.hash(password, 10)
+    const verificationToken = jwt.sign({ email }, process.env.JWT_SECRET, { expiresIn: '1h' })
+
+    const user = new User({ username, email, password: hashedPassword, verificationToken })
+    await user.save()
+
+    // Send verification email
+    const verificationLink = `${process.env.CLIENT_URL}/verify-email?token=${verificationToken}`
+    await sendEmail(email, 'Verify Your Email', `Click here to verify your email: ${verificationLink}`)
+
+    res.status(201).json({ message: 'User created successfully. Please verify your email.' })
   } catch (error) {
-    res.status(500).json({ message: 'Internal server error' });
+    res.status(500).json({ message: 'Server error' })
   }
-};
+}
 
 exports.login = async (req, res) => {
+  const { email, password } = req.body
+
   try {
-    const { email, password } = req.body;
-    const user = await User.findOne({ email });
-    if (!user || !user.isVerified) {
-      return res.status(401).json({ message: 'Invalid credentials or email not verified' });
+    const user = await User.findOne({ email })
+    if (!user) {
+      return res.status(400).json({ message: 'Invalid credentials' })
     }
-    const isPasswordValid = await bcrypt.compare(password, user.password);
-    if (!isPasswordValid) {
-      return res.status(401).json({ message: 'Invalid credentials' });
+
+    const isMatch = await bcrypt.compare(password, user.password)
+    if (!isMatch) {
+      return res.status(400).json({ message: 'Invalid credentials' })
     }
-    const token = generateToken(user._id, user.role);
-    res.status(200).json({ message: 'Login successful', token });
+
+    if (!user.isVerified) {
+      return res.status(400).json({ message: 'Please verify your email first' })
+    }
+
+    const token = jwt.sign({ id: user._id }, process.env.JWT_SECRET, { expiresIn: '1h' })
+    res.json({ token })
   } catch (error) {
-    res.status(500).json({ message: 'Internal server error' });
+    res.status(500).json({ message: 'Server error' })
   }
-};
+}
 
 exports.verifyEmail = async (req, res) => {
+  const { token } = req.query
+
   try {
-    const { userId } = req.params;
-    const user = await User.findById(userId);
+    const decoded = jwt.verify(token, process.env.JWT_SECRET)
+    const user = await User.findOne({ email: decoded.email })
+
     if (!user) {
-      return res.status(404).json({ message: 'User not found' });
+      return res.status(400).json({ message: 'Invalid verification token' })
     }
-    user.isVerified = true;
-    await user.save();
-    res.status(200).json({ message: 'Email verified successfully' });
+
+    user.isVerified = true
+    user.verificationToken = undefined
+    await user.save()
+
+    res.json({ message: 'Email verified successfully' })
   } catch (error) {
-    res.status(500).json({ message: 'Internal server error' });
+    res.status(400).json({ message: 'Invalid verification token' })
   }
-};
+}
